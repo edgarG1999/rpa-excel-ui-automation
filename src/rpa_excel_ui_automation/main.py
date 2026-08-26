@@ -1,7 +1,7 @@
+import os
 import logging
 from pathlib import Path
 from pywinauto import Application, Desktop
-from pywinauto.keyboard import send_keys
 
 # ==========================================
 # CONFIGURACIÓN DE TRAZABILIDAD (LOGS)
@@ -12,111 +12,99 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ExcelBot")
 
-
 # ==========================================
-# 1. FILE EXPLORER (Manejo de Windows)
+# 1. FILE EXPLORER (Motor Win32 Híbrido)
 # ==========================================
 class FileExplorer:
-    """
-    Responsabilidad: Interactuar exclusivamente con las ventanas de diálogo nativas 
-    de Windows (Explorador de archivos), sin usar Tabuladores ni pausas estáticas.
-    """
     def __init__(self):
-        # Usamos el backend 'uia' (UI Automation) exigido en la rúbrica
-        self.desktop = Desktop(backend="uia")
+        self.desktop = Desktop(backend="win32")
 
     def handle_open_dialog(self, target_path: Path):
-        logger.info("Esperando a que la ventana de diálogo 'Abrir' esté lista...")
-        # Localizamos la ventana directamente y usamos sincronización basada en eventos
-        dialog = self.desktop.window(title_re=".*(Abrir|Open).*", control_type="Window")
+        logger.info("Buscando ventana 'Abrir' con motor Win32...")
+        dialog = self.desktop.window(class_name="#32770", title_re=".*(Abrir|Open).*")
         dialog.wait("ready", timeout=20)
         
-        logger.info(f"Inyectando ruta absoluta origen: {target_path.resolve()}")
-        # Ubicamos el campo de texto sin usar TAB
-        edit_box = dialog.child_window(control_type="Edit", title_re=".*(Nombre de archivo|File name).*")
+        logger.info(f"Inyectando ruta origen: {target_path.resolve()}")
+        # REGLA UNIVERSAL: Atrapa el primer cuadro de edición de texto de la ventana
+        edit_box = dialog.child_window(class_name="Edit", found_index=0)
         edit_box.set_edit_text(str(target_path.resolve()))
         
-        logger.info("Ejecutando acción sobre el botón 'Abrir'...")
-        open_btn = dialog.child_window(control_type="Button", title_re=".*(Abrir|Open).*")
+        logger.info("Clic en botón Abrir...")
+        open_btn = dialog.child_window(control_id=1)
         open_btn.click()
 
     def handle_save_as_dialog(self, dest_path: Path):
-        logger.info("Esperando a que la ventana de diálogo 'Guardar como' esté lista...")
-        dialog = self.desktop.window(title_re=".*(Guardar como|Save As).*", control_type="Window")
+        dest_dir = dest_path.resolve().parent
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Buscando ventana 'Guardar como' con motor Win32...")
+        dialog = self.desktop.window(class_name="#32770", title_re=".*(Guardar como|Save As).*")
         dialog.wait("ready", timeout=20)
         
-        logger.info(f"Inyectando ruta absoluta destino: {dest_path.resolve()}")
-        edit_box = dialog.child_window(control_type="Edit", title_re=".*(Nombre de archivo|File name).*")
+        logger.info(f"Inyectando ruta destino: {dest_path.resolve()}")
+        # Aplicamos la misma regla universal para el guardado
+        edit_box = dialog.child_window(class_name="Edit", found_index=0)
         edit_box.set_edit_text(str(dest_path.resolve()))
         
-        logger.info("Ejecutando acción sobre el botón 'Guardar'...")
-        save_btn = dialog.child_window(control_type="Button", title_re=".*(Guardar|Save).*")
+        logger.info("Clic en botón Guardar...")
+        save_btn = dialog.child_window(control_id=1)
         save_btn.click()
         
-        # CONDICIÓN DE REEMPLAZO DINÁMICA (Anti-Fragilidad)
-        overwrite_dialog = dialog.child_window(title_re=".*(Confirmar|Confirm).*", control_type="Window")
+        overwrite_dialog = self.desktop.window(class_name="#32770", title_re=".*(Confirmar|Confirm).*")
         if overwrite_dialog.exists(timeout=3):
-            logger.warning("Ventana de advertencia de sobrescritura detectada.")
-            logger.info("Confirmando el reemplazo (Click en 'Sí')...")
-            yes_btn = overwrite_dialog.child_window(title_re=".*(Sí|Yes).*", control_type="Button")
+            logger.warning("Confirmando sobrescritura...")
+            yes_btn = overwrite_dialog.child_window(title_re=".*(Sí|Yes).*")
             yes_btn.click()
 
-
 # ==========================================
-# 2. EXCEL MANAGER (Manejo de la App)
+# 2. EXCEL MANAGER
 # ==========================================
 class ExcelManager:
-    """
-    Responsabilidad: Gestionar la instancia de Microsoft Excel y disparar 
-    los atajos de teclado nativos para invocar los menús.
-    """
     def __init__(self):
         self.app = Application(backend="uia")
         self.main_window = None
 
     def open_file(self):
-        logger.info("Inicializando la aplicación Microsoft Excel...")
-        self.app.start("excel.exe")
+        logger.info("Inicializando Microsoft Excel...")
+        os.system("start excel")
         
-        # Esperamos a que la ventana base de Excel levante
+        self.app.connect(title_re=".*Excel.*", timeout=20)
         self.main_window = self.app.window(title_re=".*Excel.*", control_type="Window")
         self.main_window.wait("ready", timeout=30)
         
-        logger.info("Invocando comando para abrir archivo (Ctrl + F12)...")
-        # Ctrl+F12 es el atajo nativo universal en Excel que abre directamente 
-        # el Explorador de Archivos (saltando la pantalla de inicio "Backstage")
-        send_keys('^{F12}')
+        logger.info("Dando foco a Excel y enviando atajo (Ctrl + F12)...")
+        self.main_window.set_focus()
+        self.main_window.type_keys('^{F12}')
 
     def save_as(self):
-        logger.info("Invocando atajo nativo para 'Guardar como' (F12)...")
-        send_keys('{F12}')
-
+        logger.info("Dando foco a Excel y enviando atajo (F12)...")
+        self.main_window.set_focus()
+        self.main_window.type_keys('{F12}')
 
 # ==========================================
-# ORQUESTADOR (Caso de Prueba 01 y 02)
+# ORQUESTADOR
 # ==========================================
 def main():
-    # Uso estricto de pathlib
     input_path = Path(".data/input/origen.xlsx")
     output_path = Path(".data/output/destino.xlsx")
     
     excel_manager = ExcelManager()
     explorer = FileExplorer()
     
-    # --- CASO DE PRUEBA 01 ---
     logger.info("--- INICIANDO CASO DE PRUEBA 01: APERTURA ---")
     excel_manager.open_file()
     explorer.handle_open_dialog(input_path)
     
-    # --- CASO DE PRUEBA 02 ---
     logger.info("--- INICIANDO CASO DE PRUEBA 02: GUARDADO SEGURO ---")
-    # Pausa implícita de sincronización para asegurar que el archivo cargó visualmente
-    excel_manager.main_window.wait("ready", timeout=15) 
+    # EL PARCHE: Refrescamos la ventana de Excel porque al abrir el archivo la interfaz cambió.
+    # Además, usamos "visible" en lugar de "ready" para que sea más dinámico.
+    excel_manager.main_window = excel_manager.app.window(title_re=".*Excel.*", control_type="Window")
+    excel_manager.main_window.wait("visible", timeout=15) 
     
     excel_manager.save_as()
     explorer.handle_save_as_dialog(output_path)
     
-    logger.info("¡Flujo completado con éxito! El archivo original está intacto.")
+    logger.info("¡Flujo completado con éxito!")
 
 if __name__ == "__main__":
     main()
